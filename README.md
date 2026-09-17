@@ -101,8 +101,6 @@ python3 run_tests.py
 
 ## 部署到 GitHub Pages
 
-本仓库为纯静态站点。推送到 `main` 后，GitHub Actions 会自动发布到 GitHub Pages。首次启用后，站点地址一般为：
+本仓库为纯静态站点。在 GitHub 仓库 **Settings → Pages** 中将 Source 设为 `main` 分支、`/`（根目录）即可发布。站点地址一般为：
 
-`https://<你的用户名>.github.io/shanghai-birding/`
-
-若仓库名不同，将路径中的仓库名替换即可。
+`https://yuqianmemeee.github.io/shanghai-birding/`
