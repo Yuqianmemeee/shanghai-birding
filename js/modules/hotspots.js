@@ -1,9 +1,19 @@
 (function () {
   const LEAFLET_VERSION = '1.9.4';
-  const LEAFLET_JS_URL = `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/leaflet.js`;
-  const LEAFLET_CSS_URL = `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/leaflet.css`;
-  const LEAFLET_JS_INTEGRITY = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
-  const LEAFLET_CSS_INTEGRITY = 'sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=';
+  // Prefer local vendor copy (fast on GitHub Pages / China); CDN is fallback only.
+  const LEAFLET_LOCAL_JS = 'vendor/leaflet/leaflet.js';
+  const LEAFLET_LOCAL_CSS = 'vendor/leaflet/leaflet.css';
+  const LEAFLET_CDN_JS = [
+    `https://cdn.bootcdn.net/ajax/libs/leaflet/${LEAFLET_VERSION}/leaflet.js`,
+    `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/leaflet.js`
+  ];
+  const LEAFLET_CDN_CSS = [
+    `https://cdn.bootcdn.net/ajax/libs/leaflet/${LEAFLET_VERSION}/leaflet.css`,
+    `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/leaflet.css`
+  ];
+  // Gaode tiles are GCJ-02; eBird coordinates are WGS-84 — convert markers when using Gaode.
+  const GAODE_TILE_URL = 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}';
+  const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   const SOURCE = 'eBird';
   const SOURCE_URL = window.EBirdData?.SOURCE_URL || 'https://ebird.org/region/CN-31';
   const IMPORT_FORMAT = window.EBirdData?.IMPORT_FORMAT || 'shanghai-birding-ebird-7d';
@@ -70,39 +80,135 @@
     return window.EBirdData?.observationWindow ? window.EBirdData.observationWindow(new Date()) : {start:'', end:''};
   }
 
-  function loadLeaflet() {
-    if (window.L && typeof window.L.map === 'function') return Promise.resolve(window.L);
-    if (leafletPromise) return leafletPromise;
-    leafletPromise = new Promise((resolve, reject) => {
-      let css = document.querySelector(`link[data-leaflet-css="${LEAFLET_VERSION}"]`);
-      if (!css) {
-        css = document.createElement('link');
-        css.rel = 'stylesheet';
-        css.href = LEAFLET_CSS_URL;
-        css.integrity = LEAFLET_CSS_INTEGRITY;
-        css.crossOrigin = '';
-        css.dataset.leafletCss = LEAFLET_VERSION;
-        document.head.appendChild(css);
-      }
-      if (!document.querySelector(`script[data-leaflet-js="${LEAFLET_VERSION}"]`)) {
-        const script = document.createElement('script');
-        script.src = LEAFLET_JS_URL;
-        script.integrity = LEAFLET_JS_INTEGRITY;
-        script.crossOrigin = '';
-        script.async = true;
-        script.dataset.leafletJs = LEAFLET_VERSION;
-        script.onload = () => window.L && typeof window.L.map === 'function'
-          ? resolve(window.L)
-          : reject(new Error('Leaflet loaded but global L is unavailable.'));
-        script.onerror = () => reject(new Error('Leaflet CDN failed to load.'));
-        document.head.appendChild(script);
-      } else {
-        const poll = () => window.L && typeof window.L.map === 'function'
-          ? resolve(window.L)
-          : setTimeout(poll, 20);
-        poll();
-      }
+  function loadLeafletAsset(tagName, attrs) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement(tagName);
+      Object.entries(attrs).forEach(([key, value]) => {
+        if (key === 'dataset') Object.assign(el.dataset, value);
+        else if (value != null) el[key] = value;
+      });
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error(`Failed to load ${attrs.href || attrs.src}`));
+      document.head.appendChild(el);
     });
+  }
+
+  async function ensureLeafletCss() {
+    if (document.querySelector(`link[data-leaflet-css="${LEAFLET_VERSION}"]`)) return;
+    const candidates = [LEAFLET_LOCAL_CSS, ...LEAFLET_CDN_CSS];
+    let lastError = null;
+    for (const href of candidates) {
+      try {
+        await new Promise((resolve, reject) => {
+          const css = document.createElement('link');
+          css.rel = 'stylesheet';
+          css.href = href;
+          css.dataset.leafletCss = LEAFLET_VERSION;
+          let settled = false;
+          let failed = false;
+          const done = (ok, err) => {
+            if (settled) return;
+            settled = true;
+            if (ok) resolve();
+            else reject(err || new Error(`Failed to load ${href}`));
+          };
+          css.onload = () => done(true);
+          css.onerror = () => { failed = true; done(false); };
+          // Some browsers never fire link.onload for cached/local CSS.
+          setTimeout(() => { if (!failed) done(true); }, 400);
+          document.head.appendChild(css);
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        document.querySelector(`link[data-leaflet-css="${LEAFLET_VERSION}"]`)?.remove();
+      }
+    }
+    throw lastError || new Error('Leaflet CSS failed to load.');
+  }
+
+  async function ensureLeafletJs() {
+    if (window.L && typeof window.L.map === 'function') return window.L;
+    if (document.querySelector(`script[data-leaflet-js="${LEAFLET_VERSION}"]`) && window.L) return window.L;
+    const candidates = [LEAFLET_LOCAL_JS, ...LEAFLET_CDN_JS];
+    let lastError = null;
+    for (const src of candidates) {
+      try {
+        await loadLeafletAsset('script', {
+          src,
+          async: true,
+          dataset: { leafletJs: LEAFLET_VERSION }
+        });
+        if (window.L && typeof window.L.map === 'function') return window.L;
+        lastError = new Error('Leaflet loaded but global L is unavailable.');
+      } catch (error) {
+        lastError = error;
+        document.querySelector(`script[src="${src}"]`)?.remove();
+      }
+    }
+    throw lastError || new Error('Leaflet CDN failed to load.');
+  }
+
+  function configureLeafletIcons(L) {
+    if (!L?.Icon?.Default?.mergeOptions) return;
+    const base = LEAFLET_LOCAL_CSS.replace(/leaflet\.css$/, 'images/');
+    L.Icon.Default.mergeOptions({
+      iconUrl: `${base}marker-icon.png`,
+      iconRetinaUrl: `${base}marker-icon-2x.png`,
+      shadowUrl: `${base}marker-shadow.png`
+    });
+  }
+
+  // Rough WGS-84 → GCJ-02 for China map tiles (Gaode). Outside China returns input.
+  function wgs84ToGcj02(lat, lon) {
+    const a = 6378245.0;
+    const ee = 0.00669342162296594323;
+    function outOfChina(la, lo) {
+      return lo < 72.004 || lo > 137.8347 || la < 0.8293 || la > 55.8271;
+    }
+    function transformLat(x, y) {
+      let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+      return ret;
+    }
+    function transformLon(x, y) {
+      let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+      return ret;
+    }
+    if (outOfChina(lat, lon)) return [lat, lon];
+    let dLat = transformLat(lon - 105.0, lat - 35.0);
+    let dLon = transformLon(lon - 105.0, lat - 35.0);
+    const radLat = lat / 180.0 * Math.PI;
+    let magic = Math.sin(radLat);
+    magic = 1 - ee * magic * magic;
+    const sqrtMagic = Math.sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+    dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+    return [lat + dLat, lon + dLon];
+  }
+
+  function toMapLatLng(lat, lon) {
+    if (this._mapUsesGcj02) return wgs84ToGcj02(lat, lon);
+    return [lat, lon];
+  }
+
+  function loadLeaflet() {
+    if (window.L && typeof window.L.map === 'function') {
+      configureLeafletIcons(window.L);
+      return Promise.resolve(window.L);
+    }
+    if (leafletPromise) return leafletPromise;
+    leafletPromise = (async () => {
+      await ensureLeafletCss();
+      const L = await ensureLeafletJs();
+      configureLeafletIcons(L);
+      return L;
+    })();
     return leafletPromise.catch(error => { leafletPromise = null; throw error; });
   }
 
@@ -356,7 +462,8 @@
     document.querySelectorAll('.hotspot-item').forEach(btn => btn.classList.toggle('active', btn.dataset.id === id));
     renderDetail(selected);
     if (this.map && selected.lat != null && selected.lon != null && typeof this.map.setView === 'function') {
-      this.map.setView([Number(selected.lat), Number(selected.lon)], 11);
+      const [lat, lon] = toMapLatLng.call(this, Number(selected.lat), Number(selected.lon));
+      this.map.setView([lat, lon], 11);
       this.markers?.get(id)?.openPopup?.();
     }
   }
@@ -381,8 +488,9 @@
     hotspots.forEach(h => {
       const lat = Number(h.lat), lon = Number(h.lon);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-      bounds.push([lat, lon]);
-      const marker = L.marker([lat, lon], {keyboard:false, riseOnHover:true}).addTo(this.map).bindPopup(popupHtml(h));
+      const [mapLat, mapLon] = toMapLatLng.call(this, lat, lon);
+      bounds.push([mapLat, mapLon]);
+      const marker = L.marker([mapLat, mapLon], {keyboard:false, riseOnHover:true}).addTo(this.map).bindPopup(popupHtml(h));
       if (marker.on) marker.on('click', () => select.call(this, h.id));
       this.markers.set(h.id, marker);
     });
@@ -392,6 +500,36 @@
     const active = hotspots.find(h => h.id === selectedId);
     if (active && this.markers.get(active.id)) this.markers.get(active.id).openPopup();
     return bounds.length;
+  }
+
+  function addBaseTiles(L, map) {
+    const gaode = L.tileLayer(GAODE_TILE_URL, {
+      subdomains: '1234',
+      maxZoom: 18,
+      updateWhenIdle: true,
+      keepBuffer: 2,
+      attribution: '&copy; 高德地图'
+    });
+    const osm = L.tileLayer(OSM_TILE_URL, {
+      maxZoom: 18,
+      updateWhenIdle: true,
+      keepBuffer: 2,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    });
+    let gaodeErrors = 0;
+    gaode.on?.('tileerror', () => {
+      gaodeErrors += 1;
+      if (gaodeErrors < 4 || this._mapTileFallbackDone) return;
+      this._mapTileFallbackDone = true;
+      this._mapUsesGcj02 = false;
+      try { map.removeLayer(gaode); } catch (_) {}
+      osm.addTo(map);
+      if (this._lastHotspots) placeMarkers.call(this, L, this._lastHotspots, this.selectedId);
+    });
+    this._mapUsesGcj02 = true;
+    this._mapTileFallbackDone = false;
+    gaode.addTo(map);
+    return gaode;
   }
 
   function bindHotspotChrome(hotspots) {
@@ -435,6 +573,7 @@
     const status = document.getElementById('map-status');
     const mapElement = document.getElementById('leaflet-map');
     if (!mapElement) return;
+    this._lastHotspots = hotspots;
     try {
       const L = await loadLeaflet();
       const canReuse = this.map && this._mapEl === mapElement && document.body.contains(mapElement);
@@ -445,25 +584,22 @@
         return;
       }
       if (this.map?.remove) this.map.remove();
+      this._mapUsesGcj02 = true;
+      const [centerLat, centerLon] = toMapLatLng.call(this, 31.2304, 121.4737);
       this.map = L.map(mapElement, {
         scrollWheelZoom: true,
         preferCanvas: true,
         fadeAnimation: false,
         markerZoomAnimation: false,
         zoomAnimation: true
-      }).setView([31.2304, 121.4737], 9);
+      }).setView([centerLat, centerLon], 9);
       this._mapEl = mapElement;
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 18,
-        updateWhenIdle: true,
-        keepBuffer: 2,
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-      }).addTo(this.map);
+      addBaseTiles.call(this, L, this.map);
       placeMarkers.call(this, L, hotspots, selectedId);
       if (this.map.invalidateSize) requestAnimationFrame(() => this.map.invalidateSize());
-      if (status) status.textContent = `地图已加载。数据来自 ${AppState.externalData.hotspotData?.source || SOURCE} 最近 7 日公开观测；“其它观测记录”无精确地点，不生成虚假坐标。`;
+      if (status) status.textContent = `地图已加载（国内底图）。数据来自 ${AppState.externalData.hotspotData?.source || SOURCE} 最近 7 日公开观测；“其它观测记录”无精确地点，不生成虚假坐标。`;
     } catch (error) {
-      if (status) status.innerHTML = '<strong>地图底图加载失败。</strong> Leaflet 或 OpenStreetMap 瓦片需要网络连接；真实观测点列表及下方记录仍可正常使用。';
+      if (status) status.innerHTML = '<strong>地图底图加载失败。</strong> 需要网络连接以加载地图库或瓦片；真实观测点列表及下方记录仍可正常使用。';
       mapElement.classList.add('leaflet-map-unavailable');
       console.error(error);
     }

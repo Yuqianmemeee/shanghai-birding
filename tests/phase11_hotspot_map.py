@@ -34,7 +34,7 @@ async def main():
         assert await page.locator('.hotspot-item').count()==4
         calls=await page.evaluate('window.__leafletCalls')
         assert any(c[0]=='map' for c in calls)
-        assert any(c[0]=='tileLayer' and 'openstreetmap.org' in c[1] for c in calls)
+        assert any(c[0]=='tileLayer' and ('autonavi.com' in c[1] or 'openstreetmap.org' in c[1]) for c in calls)
         assert sum(1 for c in calls if c[0]=='marker')==4
         assert all(c[0]=='marker' and len(c[1])==2 for c in calls if c[0]=='marker')
 
@@ -45,16 +45,20 @@ async def main():
         calls=await page.evaluate('window.__leafletCalls')
         assert any(c[0]=='setView' and len(c[1])==2 for c in calls)
 
-        # The production loader points at the pinned Leaflet release; intercept the network so this test remains deterministic.
+        # The production loader prefers the local Leaflet vendor; intercept the network so this test remains deterministic.
         await page.evaluate('''async () => {
             window.L=undefined;
             window.__originalHeadAppendChild = document.head.appendChild.bind(document.head);
             const append=window.__originalHeadAppendChild;
             document.head.appendChild=(node)=>{
-                if(node.tagName==='SCRIPT' && node.src.includes('/leaflet@1.9.4/dist/leaflet.js')){
+                if(node.tagName==='SCRIPT' && String(node.src||'').includes('vendor/leaflet/leaflet.js')){
                     window.L={map:function(){}};
-                    setTimeout(()=>node.onload(),0);
+                    setTimeout(()=>node.onload && node.onload(),0);
                     return node;
+                }
+                if(node.tagName==='LINK' && String(node.href||'').includes('vendor/leaflet/leaflet.css')){
+                    setTimeout(()=>node.onload && node.onload(),0);
+                    return append(node);
                 }
                 return append(node);
             };

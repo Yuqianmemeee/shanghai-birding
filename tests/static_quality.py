@@ -37,6 +37,8 @@ assert 'compositionstart' in lexicon_js and 'compositionend' in lexicon_js, 'lex
 assert 'lexicon-results' in lexicon_js, 'lexicon search should not replace the input during IME composition'
 hotspots_js=(ROOT/'js'/'modules'/'hotspots.js').read_text(encoding='utf8')
 assert "LEAFLET_VERSION = '1.9.4'" in hotspots_js
+assert 'vendor/leaflet/leaflet.js' in hotspots_js
+assert 'webrd0{s}.is.autonavi.com' in hotspots_js
 assert 'tile.openstreetmap.org/{z}/{x}/{y}.png' in hotspots_js
 latest=(ROOT/'data'/'latest_data.js').read_text(encoding='utf8')
 assert "sourceStatus: 'not_fetched'" in latest, 'production snapshot must not contain fabricated hotspot observations'
